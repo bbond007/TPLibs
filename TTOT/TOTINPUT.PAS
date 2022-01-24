@@ -29,9 +29,9 @@ Unit totINPUT;
 INTERFACE
 
 {$IFDEF DPMI}
-uses DOS,CRT,WINAPI;
+uses DOS,CRT,WINAPI, JoyLib;
 {$ELSE}
-uses DOS,CRT;
+uses DOS,CRT, JoyLib;
 {$ENDIF}
 
 Const
@@ -76,6 +76,16 @@ MouseOBJ = object
    vIntr: integer;         {mouse interrupt number}
    vVisible: boolean;      {is mouse cursor visible?}
    vForceNoMouse: boolean; {uses monochrome color schemes}
+
+   vMouseXSHR:Byte;        {# shifts for X }
+   vMouseYSHR:Byte;        {# shifts for X }
+   vSmOldLoc:word;         {old soft mouse loc }
+   vSmSave:Word;           {char + attr of mouse cursor}
+   vSmChar:Word;           {Char + Attr of soft mouse cursor}
+   videoSeg:Word;          {to write directly to screen}
+   vSoftMouse:Boolean;     {true if soft mouse is enabled}
+   vScreenStride:word;     {screen width}
+
    {methods}
    constructor Init;
    procedure   SetLeft(On:boolean);
@@ -98,6 +108,11 @@ MouseOBJ = object
    function    Visible: boolean;
    procedure   SetMouseCursorStyle(OrdChar,Attr:byte);
    function    GetButtons: byte;
+   function    VidSeg:Word;
+   procedure   DoSoftMouseInit;
+   procedure   DoSoftMouse;
+   procedure   EnableSoftMouseHack(width,height:Byte);
+   procedure   DisableSoftMouseHack;
    destructor  Done;
 end; {MouseOBJ}
 
@@ -120,6 +135,12 @@ KeyOBJ = object
    vButtons : byte;
    vSlowdelay: integer;       {time to wait for double click}
    vLastPress: longint;
+   vJoystick:Boolean;
+   vJoyAxisACentMax:Word;
+   vJoyAxisACentMin:Word;
+   vJoyAxisBCentMax:Word;
+   vJoyAxisBCentMin:Word;
+
    {methods...}
    constructor Init;
    procedure   SetSlowDelay(Del:integer);
@@ -172,6 +193,7 @@ VAR
    AlphabetTOT: ^AlphabetOBJ;
    Mouse: MouseOBJ;
    Key:   KeyOBJ;
+
 
 IMPLEMENTATION
 var
@@ -233,7 +255,7 @@ begin
       89:AK:=277; 90:AK:=300; 48:AK:=385;
    else if (K >= 49) and (K <= 57) then
            AK := K + 327
-        else 
+        else
            AK := 0;
    end; {case}
    AltKey := AK;
@@ -335,6 +357,7 @@ destructor AlphabetOBJ.Done;
 {}
 begin
 end; {AlphabetOBJ.Done}
+
 {|||||||||||||||||||||||||||||||||||||||||||}
 {                                           }
 {     M o u s e O B J    M E T H O D S      }
@@ -449,8 +472,8 @@ begin
       with Regs do
       begin
          Ax := $04;
-         Cx := pred(X*8);   {8 pixels per character}
-         Dx := pred(Y*8);   {         "-"          }
+         Cx := pred(X shl vMouseXSHR);   {8 pixels per character}
+         Dx := pred(Y shl vMouseYSHR);   {         "-"          }
       end; {with}
       Intr(vIntr,Regs);
    end;
@@ -465,13 +488,13 @@ begin
       begin
          {horizontal}
          Ax := $07;
-         Cx := pred(X1*8);
-         Dx := pred(X2*8);
+         Cx := pred(X1 shl vMouseXSHR);
+         Dx := pred(X2 shl vMouseXSHR);
          intr(vIntr,Regs);
          {vertical}
          Ax := $08;
-         Cx := pred(Y1*8);
-         Dx := pred(Y2*8);
+         Cx := pred(Y1 shl vMouseYSHR);
+         Dx := pred(Y2 shl vMouseYSHR);
          intr(vIntr,Regs);
       end;
 end; {MouseOBJ.Confine}
@@ -498,8 +521,8 @@ begin
          Bx := AdjustedButton(Button);
          intr(vIntr,Regs);
          Released := Bx;
-         X := succ(Cx div 8);
-         Y := succ(Dx div 8);
+         X := succ(Cx shr vMouseXSHR);
+         Y := succ(Dx shr vMouseYSHR);
       end;
 end; {MouseOBJ.Released}
 
@@ -514,8 +537,8 @@ begin
          Bx := AdjustedButton(Button);
          intr(vIntr,Regs);
          Pressed := Bx;
-         X := succ(Cx div 8);
-         Y := succ(Dx div 8);
+         X := succ(Cx shr vMouseXSHR);
+         Y := succ(Dx shr vMouseYSHR);
       end;
 end; {MouseOBJ.Pressed}
 
@@ -541,8 +564,8 @@ begin
       begin
          Ax := 3;
          intr(vIntr,Regs);
-         X := succ(Cx div 8);
-         Y := succ(Dx div 8);
+         X := succ(Cx shr vMouseXSHR);
+         Y := succ(Dx shr vMouseYSHR);
       end; {with}
 end; {MouseOBJ.Location}
 
@@ -556,8 +579,8 @@ begin
       begin
          Ax := 3;
          intr(vIntr,Regs);
-         X := succ(Cx div 8);
-         Y := succ(Dx div 8);
+         X := succ(Cx shr vMouseXSHR);
+         Y := succ(Dx shr vMouseYSHR);
          if vLeftHanded then
          begin
             L := ((BX and $01) = $01);
@@ -611,6 +634,7 @@ begin
          Reg.Cx := $00;
       Reg.Dl := OrdChar;
       Reg.Dh := Attr;
+      vSmChar:= Reg.DX;
       Intr($33,Reg);
    end;
 end; {MouseOBJ.SetMouseCursorStyle}
@@ -637,6 +661,75 @@ function MouseOBJ.LeftHanded:boolean; {1.00g}
 begin
    LeftHanded := vLeftHanded;
 end; {MouseOBJ.LeftHanded}
+
+{|||||||||||||||||||||||||||||||||||||||||||}
+{                                           }
+{ S o f t  M o u s e O B J    M E T H O D S }
+{                                           }
+{|||||||||||||||||||||||||||||||||||||||||||}
+
+function MouseOBJ.VidSeg : Word;
+begin
+  If Mem[$0000:$0449] = 7 Then VidSeg := $B000
+  Else VidSeg := $B800;
+end;
+
+procedure MouseOBJ.DoSoftMouseInit;
+var
+  smX,smY:Byte;
+begin
+  videoSeg := VidSeg;
+  vMouseXSHR:=3;
+  vMouseYSHR:=3;
+  vSmChar:=$4f03;
+  vSoftMouse:=false;
+  vScreenStride:=160;
+  mouse.Location(smX,smY);
+  vSmOldLoc := 160 * pred(smY) + pred(smX) + pred(smX);
+  vSmSave := MemW[videoSeg:vSmOldLoc];
+end;
+
+procedure MouseOBJ.EnableSoftMouseHack(width,height:byte);
+begin
+  vMouseXSHR     := 3;
+  vMouseYSHR     := 3;
+  vScreenStride  := width * 2;
+  if (width  > 80) then
+    vMouseXSHR   := 2;
+  if (height > $1f) then
+    vMouseYSHR   := 2;
+  vSoftMouse     := true;
+end;
+
+procedure MouseOBJ.DisableSoftMouseHack;
+begin
+  vMouseXSHR     := 3;
+  vMouseYSHR     := 3;
+  vSoftMouse     := false;
+  vScreenStride  := 160;
+end;
+
+procedure MouseOBJ.DoSoftMouse;
+var
+  smLoc:Word;
+  smX,smY:Byte;
+begin
+  if not(vSoftMouse) then exit;
+  mouse.Location(smX, smY);
+  smLoc := vScreenStride * pred(smY) + pred(smX) + pred(smX);
+  if (MemW[videoSeg:vSmOldLoc] <> vSmChar) then
+     vSmSave := MemW[videoSeg:vSmOldLoc];
+
+  if (smLoc <> vSmOldLoc) then
+  begin
+    MemW[videoSeg:vSmOldLoc] := vSmSave;
+    vSmSave := MemW[videoSeg:smLoc];
+    MemW[videoSeg:smLoc] := vSmChar;
+    vSmOldLoc:=smLoc;
+  end
+  else if (MemW[videoSeg:smLoc] <> vSmChar) then
+    MemW[videoSeg:smLoc] := vSmChar;
+end;
 
 destructor MouseOBJ.Done;
 {}
@@ -681,6 +774,11 @@ begin
    vButtons := 0;
    vSlowDelay := 350;    {was 200}
    vLastPress := 0;
+   vJoystick := false;
+   vJoyAxisACentMin   := 130;
+   vJoyAxisACentMax   := 400;
+   vJoyAxisBCentMin   := 130;
+   vJoyAxisBCentMax   := 400;
    SetMouseMethod(2);
 end; {KeyOBJ.Init}
 
@@ -867,6 +965,9 @@ function KeyOBJ.ReadKey: char;          {1.00d}
 const ch:char = #0;
 var K:byte;
 begin
+
+   (* Attempt to add joystick handling for basic functions *)
+
    if Ch = #0 then
    begin
       if ExtendedKey(K) then
@@ -878,17 +979,69 @@ begin
       begin
          ReadKey := chr(K);
          Ch := #0;
-      end;    
+      end;
    end
    else
    begin
       Readkey := Ch;
-      Ch := #0; 
+      Ch := #0;
    end;
 end; {KeyOBJ.ReadKey}
 
 procedure KeyOBJ.GetInput;
 {waits for a keypress or mouse activity}
+
+procedure CheckJoystickButton(Button:Byte;
+                              NewKeyWord:word;
+                              var KeyWord:Word;
+                              var GotResult:Boolean);
+begin
+  if JoystickButton(Button) then
+  begin
+    while (JoystickButton(Button)) do;
+    KeyWord := NewKeyWord;
+    GotResult := true;
+  end;
+end;
+
+procedure CheckJoystickAxis(Axis:Byte;
+                            Min, Max :Word;
+                            NewKeyWordUp,
+                            NewKeyWordDown:word;
+                            var KeyWord:Word;
+                            var GotResult:Boolean);
+
+const
+  ticksMax:byte=9;
+
+var
+  Ticks: longint ABSOLUTE $0040:$006c;
+  startTicks:longint;
+  joyPos:word;
+
+begin
+  joyPos := JoystickPosition(Axis);
+  if joyPos < Min then
+  begin
+    StartTicks := ticks;
+    while ((JoystickPosition(Axis) < Min) or
+          (StartTicks = Ticks)) and
+          (Ticks - startTicks < ticksMax) do;
+    KeyWord   := NewKeyWordUp;
+    GotResult := true;
+  end
+  else
+  if joyPos > Max then
+  begin
+    StartTicks := ticks;
+    while ((JoystickPosition(Axis) > Max) or
+          (StartTicks = Ticks)) and
+          (Ticks - startTicks < ticksMax) do;
+    KeyWord   := NewKeyWordDown;
+    GotResult := true;
+  end;
+end;
+
 Const
    H = 40;
    V = 13;
@@ -904,6 +1057,7 @@ Var
    InitDelay: longint;
    LeftPresses, RightPresses, CenterPresses: word;
    ButtonCombinations: byte;
+
 
    function ReadFromBuffer:boolean;  {1.00e}
    {}
@@ -922,6 +1076,7 @@ Var
    end;
 
 begin
+
    if vWaitForDouble then
       InitDelay := vSlowdelay div 55  {for backward compatibility}
    else
@@ -933,6 +1088,7 @@ begin
       Action := false;
       Finished := false;
       repeat
+         mouse.DoSoftMouse;
          vIdleHook;   {call the users idle hook procedure}
          if ReadFromBuffer then             {1.00e}
             Finished := true
@@ -1030,9 +1186,30 @@ begin
             end;
             end; {case}
          end; {if}
+
+         if(vJoystick) then
+         begin
+           CheckJoystickButton (JoystickAButton1, 13,  KeyWord, Finished);   {Button A}
+           CheckJoystickButton (JoystickAButton2, 27,  KeyWord, Finished);   {Button B}
+         { CheckJoystickButton (JoystickAButton3, 329, KeyWord, Finished); } {Button C}
+         { CheckJoystickButton (JoystickAButton4, 337, KeyWord, Finished); } {Button D}
+           CheckJoystickAxis   (JoystickAAxisX,
+                                vJoyAxisACentMin,
+                                vJoyAxisACentMax,                            {Axis   X}
+                                329, 337,
+                                KeyWord, Finished);
+
+           CheckJoystickAxis   (JoystickAAxisY,
+                                vJoyAxisBCentMin,
+                                vJoyAxisBCentMax,                            {Axis   Y}
+                                328, 336,
+                                KeyWord, Finished);
+         end; {vJoystick}
+
          If KeyPressed or Finished then
             Action := true;
       until Action;
+
       if not finished then
       begin
         Ch := ReadKey;
@@ -1053,8 +1230,8 @@ begin
         else
            KeyWord := ord(Ch);
       end;
-
    end;
+
    vPressedHook(Keyword);
    vLastKey := Keyword;
    vLastX := X;
@@ -1115,7 +1292,7 @@ procedure KeyOBJ.StuffBuffer(W:word);
 begin
    if (vBufferTail + 1 = vBufferHead)
    or ((vBufferTail = StuffBufferSize) and (vBufferHead = 1)) then
-      exit; {buffer full}     
+      exit; {buffer full}
    vBuffer[vBufferTail] := W;
    if vBufferTail < StuffBufferSize then
       inc(vBufferTail)
@@ -1138,7 +1315,7 @@ begin
          StuffBuffer(ord(Str[I]));
          inc(I);
       end;
-   end; 
+   end;
 end; {KeyOBJ.StuffBufferStr}
 
 function KeyOBJ.Keypressed: boolean;   {1.00d}
@@ -1251,6 +1428,7 @@ begin
    KeyStatusBits := ptr($0040,$0017);
 {$ENDIF}
    new(AlphabetTOT,Init);
+   Mouse.DoSoftMouseInit;
    Mouse.Init;
    Key.Init;
 end;
@@ -1260,5 +1438,7 @@ end;
 begin
    {$IFDEF INITTRACE}writeln('inputinit');{$ENDIF}
    InputInit;
+
 {$ENDIF}
+
 end.

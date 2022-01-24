@@ -179,7 +179,7 @@ ListOBJ = object
    function    LastKey: word;
    procedure   Go;
    procedure   Show;
-   function    CharTask(var K:word; var X,Y: byte; 
+   function    CharTask(var K:word; var X,Y: byte;
                         HiPick:longint): tListAction;          VIRTUAL;
    function    MessageTask(HiPick:longint):string;             VIRTUAL;
    function    GetString(Pick, Start,Finish:longint): string;  VIRTUAL;
@@ -225,10 +225,13 @@ ListDirOBJ = object (ListOBJ)
    vFileList: ^FileDLLOBJ;
    vActiveDir: PathStr;
    vChangeDir: boolean;
+   vSortField: byte;
+   vSortOrder: boolean;
    {methods ...}
    constructor Init;
    procedure   SetChangeDir(On:boolean);
    procedure   ReadFiles(FileMasks:string; FileAttrib: word);
+   procedure   SortFiles(SortField:byte;SortOrder:boolean);
    function    GetHiString: string;
    procedure   Go;
    function    FileList:FileDLLPtr;
@@ -830,7 +833,7 @@ begin
    vSAttr := LookTOT^.MenuOff;
    vWin^.SetColors(0,vNattr,0,0);
    vDualColors := false;
-   vLastkey := 0;                         {1.10c}
+   vLastkey := 0;                    {1.10c}
 end; {ListOBJ.Init}
 
 procedure ListOBJ.SetTopPick(TopPick: longint);
@@ -1227,7 +1230,7 @@ begin
             vActivePick := succ(vTotPicks - vTopPick);
          DisplayPick(vActivePick,True);
       end
-      else 
+      else
       begin
          vTopPick := vTopPick + vRows;
          if vTopPick + pred(vActivePick) > vTotPicks then
@@ -1533,13 +1536,13 @@ begin
    vWin^.Remove;
 end; {ListOBJ.Remove}
 
-function ListOBJ.CharTask(var K:word; var X,Y: byte;HiPick:longint): tListAction; 
+function ListOBJ.CharTask(var K:word; var X,Y: byte;HiPick:longint): tListAction;
 {}
 begin
    CharTask := vCharHook(K,X,Y,HiPick);
 end; {ListOBJ.CharTask}
 
-function ListOBJ.MessageTask(HiPick:longint):string; 
+function ListOBJ.MessageTask(HiPick:longint):string;
 {}
 begin
    MessageTask := vMsgHook(HiPick);
@@ -1777,6 +1780,8 @@ begin
    vDualColors := true;
    vColWidth := 15;
    vWin^.SetSize(10,5,71,20,1);
+   vSortField := 0;
+   vSortOrder := false;
    vChangeDir := true; {1.00g}
 end; {ListDirOBJ.Init}
 
@@ -1825,10 +1830,19 @@ begin
       Filemasks := vActiveDir+Filemasks;
    end;
    Win^.SetTitle(FileMasks);
+
    vFileList^.FillList;
    vTotPicks := vFileList^.TotalNodes;
    vListAssigned := true;
+
 end; {ListDirOBJ.ReadFiles}
+
+procedure ListDirOBJ.SortFiles(SortField:byte;SortOrder:boolean);
+begin
+  vSortField := SortField;
+  vSortOrder := SortOrder;
+  vFileList^.Sort(vSortField,vSortOrder); {bbond007 ???}
+end; {ListDirOBJ.SortFiles}
 
 function ListDirOBJ.GetString(Pick, Start,Finish: longint):string;
 {}
@@ -1972,8 +1986,8 @@ var
   OK,Cancel: Strip3DIOOBJ;
   SField,SOrder: RadioIOOBJ;
   Result: tAction;
-  SortField: byte;
-  SortOrder: boolean;
+  {SortField: byte;   }
+  {SortOrder: boolean;}
 begin
    Control.Init; {Tab, STab, Enter, Esc}
    OK.Init(23,5,'   ~O~K   ',Finished);
@@ -1988,6 +2002,7 @@ begin
       AddItem('~E~xt', ord('E'),vFileList^.vSortID = 2);
       AddItem('~S~ize',ord('S'),vFileList^.vSortID = 3);
       AddItem('~T~ime',ord('T'),vFileList^.vSortID = 4);
+      SetValue(vSortField+1); {bbond007 ???}
       SetID(1);
    end;
    with SOrder do
@@ -1995,6 +2010,8 @@ begin
       Init(3,9,18,3,'Sort Order:');
       AddItem('~A~scending',ord('A'),vFileList^.vSortAscending);
       AddItem('~D~escending',ord('D'),not vFileList^.vSortAscending);
+      if(VSortOrder) then
+        setValue(1);
    end;
    with Manager do
    begin
@@ -2009,8 +2026,8 @@ begin
      Win^.SetTitle('Directory Sort Options');
      Draw;
      Result := Go;
-     SortField := pred(Sfield.GetValue);
-     SortOrder := (SOrder.GetValue = 1);
+     vSortField := pred(Sfield.GetValue);
+     vSortOrder := (SOrder.GetValue = 1);
      Control.Done;
      OK.Done;
      Cancel.Done;
@@ -2020,7 +2037,7 @@ begin
    end;
    if Result = Finished then
    begin
-      vFileList^.Sort(SortField,SortOrder);
+      vFileList^.Sort(vSortField,vSortOrder);
       vTopPick := 1;
       vActivePick := 1;
       PromptAndSort := true;
